@@ -167,10 +167,11 @@ if (NOT PLATFORM_IPHONE AND NOT PLATFORM_ANDROID)
   find_package(Qt6 COMPONENTS REQUIRED ${qt_components} OPTIONAL_COMPONENTS Positioning PATHS $ENV{QT_PATH} /opt/homebrew/opt/qt@6 /usr/local/opt/qt@6 /usr/lib/x86_64-linux-gnu/qt6)
 
   set(MINIMUM_REQUIRED_QT_VERSION 6.4.0)
-  if (Qt6Widgets_VERSION VERSION_LESS ${MINIMUM_REQUIRED_QT_VERSION})
-    message(FATAL_ERROR "Unsupported Qt version: ${Qt6Widgets_VERSION}, the minimum required is ${MINIMUM_REQUIRED_QT_VERSION}")
+  # Widgets are not required with SKIP_QT_GUI and without tests.
+  if (Qt6Core_VERSION VERSION_LESS ${MINIMUM_REQUIRED_QT_VERSION})
+    message(FATAL_ERROR "Unsupported Qt version: ${Qt6Core_VERSION}, the minimum required is ${MINIMUM_REQUIRED_QT_VERSION}")
   else()
-    message(STATUS "Found Qt version: ${Qt6Widgets_VERSION}")
+    message(STATUS "Found Qt version: ${Qt6Core_VERSION}")
   endif()
 
   if (PLATFORM_LINUX AND Qt6_DIR MATCHES "/\\.?linuxbrew/")
