@@ -212,3 +212,5 @@ endif()
 
 # strings::UniChar clashes with Apple's definition.
 set_property(SOURCE preferred_languages.cpp PROPERTY SKIP_UNITY_BUILD_INCLUSION ON)
+# Keep the dummy localization in its own object, so an app can link its own implementation instead (gtk/).
+set_property(SOURCE localization_dummy.cpp PROPERTY SKIP_UNITY_BUILD_INCLUSION ON)
