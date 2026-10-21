@@ -79,6 +79,7 @@ private:
   std::vector<ActiveTouch> m_touches;
   int64_t m_nextTouchId = 0;
   bool m_mousePressed = false;
+  m2::PointF m_pointer;  // last pointer position over the map, device px
   double m_pinchScale = 1.0;
 };
 }  // namespace gtk

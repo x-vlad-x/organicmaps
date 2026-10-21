@@ -80,6 +80,15 @@ MapView::MapView()
       legacy, "event", [this](GtkEventControllerLegacy *, GdkEvent * e) { return OnEvent(e); });
   gtk_widget_add_controller(m_area, legacy);
 
+  // Scroll events have no position on Wayland: track the pointer to zoom around it.
+  auto * motion = gtk_event_controller_motion_new();
+  for (char const * signal : {"enter", "motion"})
+  {
+    Connect<void(GtkEventControllerMotion *, double, double)>(
+        motion, signal, [this](GtkEventControllerMotion *, double x, double y) { m_pointer = ToDevice(x, y); });
+  }
+  gtk_widget_add_controller(m_area, motion);
+
   auto * scroll = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
   Connect<gboolean(GtkEventControllerScroll *, double, double)>(
       scroll, "scroll", [this, scroll](GtkEventControllerScroll *, double dx, double dy)
@@ -439,6 +448,6 @@ void MapView::OnScroll(double dx, double dy, GdkScrollUnit unit)
     return;
   UNUSED_VALUE(dx);
   double const steps = unit == GDK_SCROLL_UNIT_WHEEL ? dy : dy / 40.0;
-  GetFramework().Scale(std::exp(-steps * 0.25), false);
+  GetFramework().Scale(std::exp(-steps * 0.25), m2::PointD(m_pointer), false);
 }
 }  // namespace gtk
