@@ -58,6 +58,8 @@ void LocationService::OnSimpleReady(GObject *, GAsyncResult * res, gpointer data
       auto * self = static_cast<LocationService *>(data);
       LOG(LWARNING, ("GeoClue is not available:", error->message));
       bool const denied = g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED);
+      // Let the next Start() ask again, e.g. after the user enabled location services.
+      self->Stop();
       if (self->m_onError)
         self->m_onError(denied ? location::EDenied : location::ENotSupported);
     }
