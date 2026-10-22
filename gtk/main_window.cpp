@@ -21,6 +21,8 @@
 
 #include "base/logging.hpp"
 
+#include <cmath>
+
 namespace gtk
 {
 namespace
@@ -147,10 +149,10 @@ void MainWindow::BuildUi()
   {
     if (!adw_bottom_sheet_get_open(m_sheet))
       m_placePage->OnSheetClosed();
-    UpdateMapInsets();
+    QueueMapInsetsUpdate();
   });
   Connect<void(GObject *, GParamSpec *)>(m_sheet, "notify::sheet-height",
-                                         [this](GObject *, GParamSpec *) { UpdateMapInsets(); });
+                                         [this](GObject *, GParamSpec *) { QueueMapInsetsUpdate(); });
 
   // Keep the map gestures separate from the standard draggable window header.
   auto * mapToolbar = adw_toolbar_view_new();
@@ -238,15 +240,14 @@ void MainWindow::BuildMapControls(GtkWidget * overlay)
   gtk_box_append(GTK_BOX(m_rightButtons), zoomOut);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), m_rightButtons);
 
-  // Bottom area: download card, my position button and the bottom menu (or mode panels).
-  auto * bottom = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-  gtk_widget_set_valign(bottom, GTK_ALIGN_END);
-  gtk_widget_add_css_class(bottom, "map-bottom");
-
+  // Bottom area: download card, my position button and the bottom menu (or mode panels). Separate
+  // overlays sized to their content: a transparent container spanning the map would take its input.
+  // UpdateMapInsets() stacks them.
   m_downloadCard = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
   gtk_widget_add_css_class(m_downloadCard, "card");
   gtk_widget_add_css_class(m_downloadCard, "download-card");
   gtk_widget_set_halign(m_downloadCard, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign(m_downloadCard, GTK_ALIGN_END);
   gtk_widget_set_margin_start(m_downloadCard, 24);
   gtk_widget_set_margin_end(m_downloadCard, 24);
   m_downloadTitle = gtk_label_new("");
@@ -276,21 +277,24 @@ void MainWindow::BuildMapControls(GtkWidget * overlay)
   gtk_box_append(GTK_BOX(m_downloadCard), m_downloadProgress);
   gtk_box_append(GTK_BOX(m_downloadCard), m_downloadButton);
   gtk_widget_set_visible(m_downloadCard, FALSE);
-  gtk_box_append(GTK_BOX(bottom), m_downloadCard);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), m_downloadCard);
 
   m_myPositionButton =
       MakeIconButton(MyPositionIcon(location::PendingPosition), T("core_my_position").c_str(), "map-button");
   gtk_widget_set_halign(m_myPositionButton, GTK_ALIGN_END);
+  gtk_widget_set_valign(m_myPositionButton, GTK_ALIGN_END);
   gtk_widget_set_margin_end(m_myPositionButton, 12);
   OnClicked(m_myPositionButton, [this]()
   {
     StartLocation();
     GetFramework().SwitchMyPositionNextMode();
   });
-  gtk_box_append(GTK_BOX(bottom), m_myPositionButton);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), m_myPositionButton);
 
+  // Holds the full width mode panels only.
   m_bottomSlot = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  gtk_box_append(GTK_BOX(bottom), m_bottomSlot);
+  gtk_widget_set_valign(m_bottomSlot, GTK_ALIGN_END);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), m_bottomSlot);
 
   // Keep map attribution readable and keyboard-accessible, with links to both sources.
   m_mapAttribution = gtk_label_new(nullptr);
@@ -299,31 +303,43 @@ void MainWindow::BuildMapControls(GtkWidget * overlay)
   gtk_label_set_wrap(GTK_LABEL(m_mapAttribution), TRUE);
   gtk_label_set_justify(GTK_LABEL(m_mapAttribution), GTK_JUSTIFY_CENTER);
   gtk_widget_set_halign(m_mapAttribution, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign(m_mapAttribution, GTK_ALIGN_END);
   gtk_widget_add_css_class(m_mapAttribution, "caption");
   gtk_widget_add_css_class(m_mapAttribution, "map-attribution");
-  gtk_box_append(GTK_BOX(bottom), m_mapAttribution);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), m_mapAttribution);
 
   m_bottomMenu = BuildBottomMenu();
-  gtk_box_append(GTK_BOX(bottom), m_bottomMenu);
+  gtk_widget_set_valign(m_bottomMenu, GTK_ALIGN_END);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), m_bottomMenu);
 
-  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), bottom);
-
-  // Let the engine know which parts of the map are covered (ruler and compass placement).
+  // Stack the controls and let the engine know which parts of the map are covered (ruler and compass
+  // placement).
   Connect<gboolean(GtkOverlay *, GtkWidget *, GdkRectangle *)>(overlay, "get-child-position",
                                                                [this](GtkOverlay *, GtkWidget *, GdkRectangle *)
   {
-    // Called during allocation; defer to keep it out of the layout pass.
-    if (m_insetsIdle == 0)
-    {
-      m_insetsIdle = g_idle_add_once([](gpointer data)
-      {
-        auto * self = static_cast<MainWindow *>(data);
-        self->m_insetsIdle = 0;
-        self->UpdateMapInsets();
-      }, this);
-    }
+    QueueMapInsetsUpdate();
     return FALSE;
   });
+}
+
+void MainWindow::AddUnderTopSlot(GtkWidget * widget)
+{
+  gtk_widget_set_valign(widget, GTK_ALIGN_START);
+  gtk_overlay_add_overlay(GTK_OVERLAY(m_overlay), widget);
+  m_underTopSlot.push_back(widget);
+}
+
+void MainWindow::QueueMapInsetsUpdate()
+{
+  // Out of the allocation and snapshot passes, where the margins must not change.
+  if (m_insetsIdle != 0)
+    return;
+  m_insetsIdle = g_idle_add_once([](gpointer data)
+  {
+    auto * self = static_cast<MainWindow *>(data);
+    self->m_insetsIdle = 0;
+    self->UpdateMapInsets();
+  }, this);
 }
 
 GtkWidget * MainWindow::BuildBottomMenu()
@@ -368,12 +384,36 @@ void MainWindow::UpdateMapInsets()
 {
   if (m_shutdown)
     return;
-  int bottom = gtk_widget_get_height(m_mapAttribution);
-  if (gtk_widget_get_visible(m_bottomMenu))
-    bottom += gtk_widget_get_height(m_bottomMenu);
-  if (gtk_widget_get_visible(m_bottomSlot))
-    bottom += gtk_widget_get_height(m_bottomSlot);
-  int const top = gtk_widget_get_visible(m_topSlot) ? gtk_widget_get_height(m_topSlot) : 0;
+  // Border boxes, unlike gtk_widget_get_height(), include the CSS padding and border.
+  auto const height = [this](GtkWidget * widget)
+  {
+    graphene_rect_t bounds;
+    if (!gtk_widget_get_visible(widget) || !gtk_widget_compute_bounds(widget, m_map->Widget(), &bounds))
+      return 0;
+    return static_cast<int>(std::ceil(bounds.size.height));
+  };
+
+  int top = height(m_topSlot);
+  for (auto * widget : m_underTopSlot)
+  {
+    gtk_widget_set_margin_top(widget, top);
+    top += height(widget);
+  }
+
+  // From the bottom edge up, 12 px apart; the map is covered up to the mode panels.
+  int stacked = 0;
+  auto const stack = [&](GtkWidget * widget)
+  {
+    gtk_widget_set_margin_bottom(widget, stacked);
+    if (int const h = height(widget); h > 0)
+      stacked += h + 12;
+  };
+  stack(m_bottomMenu);
+  stack(m_mapAttribution);
+  stack(m_bottomSlot);
+  int bottom = std::max(0, stacked - 12);
+  stack(m_myPositionButton);
+  stack(m_downloadCard);
   // Keep the selected object visible above the place page, like Android does.
   if (adw_bottom_sheet_get_open(m_sheet))
     bottom = std::max(bottom, adw_bottom_sheet_get_sheet_height(m_sheet));
@@ -393,7 +433,7 @@ void MainWindow::SetMode(Mode mode)
   gtk_widget_set_visible(m_layersButton, def);
   gtk_widget_set_visible(m_rightButtons, ZoomButtonsEnabled());
   UpdateDownloadCard();
-  UpdateMapInsets();
+  QueueMapInsetsUpdate();
   UpdateTrackRecordingState();
 }
 
@@ -457,7 +497,8 @@ void MainWindow::SetupFramework()
     }
     // Like Android: ask for the location on start, the engine shows "pending" until the first fix.
     StartLocation();
-    UpdateMapInsets();
+    // Called from the snapshot of the map.
+    QueueMapInsetsUpdate();
     UpdateTrackRecordingState();
   };
 }
@@ -495,7 +536,7 @@ void MainWindow::ToggleMapControls()
   gtk_widget_set_visible(m_layersButton, show);
   gtk_widget_set_visible(m_rightButtons, show && ZoomButtonsEnabled());
   gtk_widget_set_visible(m_myPositionButton, show);
-  UpdateMapInsets();
+  QueueMapInsetsUpdate();
 }
 
 void MainWindow::UpdateKeepScreenOn()

@@ -288,7 +288,6 @@ void RoutingUi::BuildNavigationPanels()
   m_lanes = gtk_label_new("");
   gtk_widget_add_css_class(m_lanes, "nav-next-turn");
   gtk_widget_set_halign(m_lanes, GTK_ALIGN_CENTER);
-  gtk_box_append(GTK_BOX(m_navTop), m_lanes);
 
   m_nextTurnBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
   gtk_widget_add_css_class(m_nextTurnBox, "nav-next-turn");
@@ -297,9 +296,14 @@ void RoutingUi::BuildNavigationPanels()
   m_nextTurnImage = gtk_image_new();
   gtk_image_set_pixel_size(GTK_IMAGE(m_nextTurnImage), 28);
   gtk_box_append(GTK_BOX(m_nextTurnBox), m_nextTurnImage);
-  gtk_box_append(GTK_BOX(m_navTop), m_nextTurnBox);
   gtk_widget_set_visible(m_navTop, FALSE);
   gtk_box_append(GTK_BOX(m_window.TopSlot()), m_navTop);
+  // Not in the full width panel box, which would take the map input next to them.
+  for (auto * tab : {m_lanes, m_nextTurnBox})
+  {
+    gtk_widget_set_visible(tab, FALSE);
+    m_window.AddUnderTopSlot(tab);
+  }
 
   // Bottom: stop, time/arrival/distance, speed, voice.
   m_navBottom = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
@@ -362,6 +366,8 @@ void RoutingUi::EnterPlanningMode()
   m_window.SetMode(MainWindow::Mode::RoutePlanning);
   gtk_widget_set_visible(m_navTop, FALSE);
   gtk_widget_set_visible(m_navBottom, FALSE);
+  gtk_widget_set_visible(m_lanes, FALSE);
+  gtk_widget_set_visible(m_nextTurnBox, FALSE);
   gtk_widget_set_visible(m_planTop, TRUE);
   gtk_widget_set_visible(m_planBottom, TRUE);
   UpdateRouterButtons();
@@ -374,6 +380,8 @@ void RoutingUi::LeaveRoutingModes()
   gtk_widget_set_visible(m_planBottom, FALSE);
   gtk_widget_set_visible(m_navTop, FALSE);
   gtk_widget_set_visible(m_navBottom, FALSE);
+  gtk_widget_set_visible(m_lanes, FALSE);
+  gtk_widget_set_visible(m_nextTurnBox, FALSE);
   m_window.SetMode(MainWindow::Mode::Default);
 }
 

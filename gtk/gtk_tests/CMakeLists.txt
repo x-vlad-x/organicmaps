@@ -2,6 +2,7 @@ project(gtk_tests)
 
 set(SRC
   gui_thread_tests.cpp
+  location_service_tests.cpp
   location_tests.cpp
   touch_input_tests.cpp
   ../location.cpp

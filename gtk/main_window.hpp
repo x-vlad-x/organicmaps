@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace gtk
 {
@@ -61,8 +62,9 @@ public:
   Mode GetMode() const { return m_mode; }
   GtkWidget * TopSlot() const { return m_topSlot; }
   GtkWidget * BottomSlot() const { return m_bottomSlot; }
+  // Adds a widget hanging under the top slot, stacked in the order added; its visibility is up to the caller.
+  void AddUnderTopSlot(GtkWidget * widget);
 
-  void UpdateMapInsets();
   void ShowDownloaderPage(std::string const & rootId = {});
   void ShowBookmarksPage();
   void ShowSettings();
@@ -77,6 +79,8 @@ private:
   void BuildUi();
   void BuildMapControls(GtkWidget * overlay);
   GtkWidget * BuildBottomMenu();
+  void QueueMapInsetsUpdate();
+  void UpdateMapInsets();
   void LoadCss();
   void SetupFramework();
   void OnMyPositionModeChanged(location::EMyPositionMode mode, bool routingActive);
@@ -104,6 +108,7 @@ private:
   GtkWidget * m_bottomMenu = nullptr;
   GtkWidget * m_topSlot = nullptr;
   GtkWidget * m_bottomSlot = nullptr;
+  std::vector<GtkWidget *> m_underTopSlot;
   GtkWidget * m_mapAttribution = nullptr;
   GtkWidget * m_downloadCard = nullptr;
   GtkWidget * m_downloadTitle = nullptr;

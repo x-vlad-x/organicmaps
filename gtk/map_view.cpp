@@ -93,7 +93,7 @@ MapView::MapView()
   for (char const * signal : {"enter", "motion"})
   {
     Connect<void(GtkEventControllerMotion *, double, double)>(
-        motion, signal, [this](GtkEventControllerMotion *, double x, double y) { m_pointer = ToDevice(x, y); });
+        motion, signal, [this](GtkEventControllerMotion *, double x, double y) { m_pointer.emplace(x, y); });
   }
   gtk_widget_add_controller(m_area, motion);
 
@@ -222,6 +222,8 @@ void MapView::OnResize(int w, int h)
   if (std::abs(m_scale - oldScale) > 0.01)
   {
     LOG(LINFO, ("Visual scale changed from", oldScale, "to", m_scale));
+    // The gesture in progress has its points in the old device pixels.
+    m_touches.Cancel();
     fw.UpdateVisualScale(m_scale);
   }
   fw.OnSize(w, h);
@@ -410,7 +412,7 @@ void MapView::OnScroll(double dx, double dy, GdkScrollUnit unit)
   double const steps = unit == GDK_SCROLL_UNIT_WHEEL ? dy : dy / 40.0;
   double const factor = std::exp(-steps * 0.25);
   if (m_pointer)
-    GetFramework().Scale(factor, m2::PointD(*m_pointer), false);
+    GetFramework().Scale(factor, m2::PointD(ToDevice(m_pointer->x, m_pointer->y)), false);
   else
     GetFramework().Scale(factor, false);
 }

@@ -68,7 +68,8 @@ private:
   std::atomic<bool> m_renderQueued = false;
 
   TouchInput m_touches;
-  std::optional<m2::PointF> m_pointer;  // last pointer position over the map, device px
+  // The last pointer position over the map in logical px: the scale may change before the next motion.
+  std::optional<m2::PointD> m_pointer;
   double m_pinchScale = 1.0;
 };
 }  // namespace gtk
