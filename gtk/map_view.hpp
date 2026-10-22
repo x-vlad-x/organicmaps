@@ -1,8 +1,7 @@
 #pragma once
 
 #include "gl_factory.hpp"
-
-#include "drape_frontend/gui/skin.hpp"
+#include "touch_input.hpp"
 
 #include <gtk/gtk.h>
 
@@ -10,6 +9,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace gtk
 {
@@ -35,16 +35,10 @@ public:
   // Called once the drape engine exists.
   std::function<void()> m_onEngineCreated;
 
+  // Destroys the engine; nothing it has queued on the main loop runs afterwards.
   void Shutdown();
 
 private:
-  struct ActiveTouch
-  {
-    GdkEventSequence * m_sequence = nullptr;
-    int64_t m_id = -1;
-    m2::PointF m_pos;
-  };
-
   void OnRealize();
   void OnUnrealize();
   void OnResize(int w, int h);
@@ -54,13 +48,11 @@ private:
   void CreateEngine(int w, int h);
   void BuildBlitProgram();
   void UpdateWidgetLayout();
-  void SendTouches(int type, uint8_t maskedIndex);
   m2::PointF ToDevice(double x, double y) const;
   void QueueRender();
 
   GtkWidget * m_area = nullptr;
   std::unique_ptr<GtkContextFactory> m_factory;
-  std::unique_ptr<gui::Skin> m_skin;
   bool m_engineCreated = false;
   bool m_shutdown = false;
   double m_scale = 1.0;
@@ -75,11 +67,8 @@ private:
 
   std::atomic<bool> m_renderQueued = false;
 
-  // Up to two fingers are passed to the engine, like the Android client does.
-  std::vector<ActiveTouch> m_touches;
-  int64_t m_nextTouchId = 0;
-  bool m_mousePressed = false;
-  m2::PointF m_pointer;  // last pointer position over the map, device px
+  TouchInput m_touches;
+  std::optional<m2::PointF> m_pointer;  // last pointer position over the map, device px
   double m_pinchScale = 1.0;
 };
 }  // namespace gtk

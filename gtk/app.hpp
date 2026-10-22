@@ -22,12 +22,15 @@ struct App
   Framework * framework = nullptr;
   AdwApplication * application = nullptr;
   MainWindow * window = nullptr;
+  // Set when the window shuts down: its widgets are being destroyed.
+  bool shuttingDown = false;
 };
 
 App & GetApp();
 Framework & GetFramework();
 
-// Runs |fn| on the GTK main loop (safe to call from any thread).
+// Runs |fn| on the GTK main loop (safe to call from any thread). Tasks still queued when the app
+// shuts down are dropped.
 void RunOnUiThread(std::function<void()> fn);
 
 // Small helpers around plain GTK C API.

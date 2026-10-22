@@ -4,7 +4,7 @@
 
 #include "map/framework.hpp"
 
-#include "drape_frontend/user_event_stream.hpp"
+#include "drape_frontend/gui/skin.hpp"
 #include "drape_frontend/visual_params.hpp"
 
 #include "base/logging.hpp"
@@ -54,6 +54,11 @@ GLuint CompileShader(GLenum type, char const * src)
 }  // namespace
 
 MapView::MapView()
+  : m_touches([this](df::TouchEvent const & e)
+{
+  if (m_engineCreated)
+    GetFramework().TouchEvent(e);
+})
 {
   m_area = gtk_gl_area_new();
   g_object_ref_sink(m_area);
@@ -61,6 +66,9 @@ MapView::MapView()
   gtk_widget_set_vexpand(m_area, TRUE);
   gtk_widget_set_focusable(m_area, TRUE);
   gtk_widget_add_css_class(m_area, "map-view");
+  gtk_accessible_update_property(GTK_ACCESSIBLE(m_area), GTK_ACCESSIBLE_PROPERTY_LABEL, "Map",
+                                 GTK_ACCESSIBLE_PROPERTY_DESCRIPTION,
+                                 "Arrow keys move the map, plus and minus keys zoom it", -1);
 
   auto * area = GTK_GL_AREA(m_area);
   gtk_gl_area_set_allowed_apis(area, GDK_GL_API_GLES);
@@ -103,9 +111,10 @@ MapView::MapView()
   gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(zoom), GTK_PHASE_BUBBLE);
   Connect<void(GtkGestureZoom *, double)>(zoom, "scale-changed", [this, zoom](GtkGestureZoom *, double scale)
   {
-    // Touchscreen pinches are handled by the engine through raw touches.
-    auto * device = gtk_gesture_get_device(GTK_GESTURE(zoom));
-    if (!m_engineCreated || !device || gdk_device_get_source(device) != GDK_SOURCE_TOUCHPAD)
+    // Touchscreen pinches are handled by the engine through raw touches. Check the event, not the
+    // device: on Wayland touchpad gestures come from the logical pointer with the mouse source.
+    auto * event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(zoom));
+    if (!m_engineCreated || !event || gdk_event_get_event_type(event) != GDK_TOUCHPAD_PINCH)
       return;
     GetFramework().Scale(scale / m_pinchScale, false);
     m_pinchScale = scale;
@@ -132,9 +141,12 @@ void MapView::Shutdown()
     fw.EnterBackground();
     fw.SetRenderingDisabled(true);
     m_factory->PrepareToShutdown();
+    // Joins the render thread, so QueueRender() is not called any more.
     fw.DestroyDrapeEngine();
     m_engineCreated = false;
   }
+  // The idle callback of QueueRender() may still be pending.
+  g_idle_remove_by_data(this);
   m_factory.reset();
 }
 
@@ -151,6 +163,7 @@ void MapView::OnRealize()
 
 void MapView::OnUnrealize()
 {
+  m_touches.Cancel();
   gtk_gl_area_make_current(GTK_GL_AREA(m_area));
   if (m_program)
     glDeleteProgram(m_program);
@@ -191,6 +204,7 @@ void MapView::OnResize(int w, int h)
 {
   if (w <= 0 || h <= 0 || m_shutdown)
     return;
+  double const oldScale = m_scale;
   int const logicalW = gtk_widget_get_width(m_area);
   if (logicalW > 0)
     m_scale = static_cast<double>(w) / logicalW;
@@ -202,15 +216,21 @@ void MapView::OnResize(int w, int h)
     CreateEngine(w, h);
     return;
   }
-  GetFramework().OnSize(w, h);
-  if (m_skin)
-    m_skin->Resize(w, h);
+  auto & fw = GetFramework();
+  // E.g. the window moved to a monitor with another scale. The tolerance ignores pixel rounding:
+  // the engine reloads its resources on every change. Its drag threshold keeps the initial scale.
+  if (std::abs(m_scale - oldScale) > 0.01)
+  {
+    LOG(LINFO, ("Visual scale changed from", oldScale, "to", m_scale));
+    fw.UpdateVisualScale(m_scale);
+  }
+  fw.OnSize(w, h);
   UpdateWidgetLayout();
 }
 
 void MapView::CreateEngine(int w, int h)
 {
-  m_factory = std::make_unique<GtkContextFactory>(gtk_widget_get_display(m_area), [this]() { QueueRender(); });
+  m_factory = std::make_unique<GtkContextFactory>(gtk_widget_get_display(m_area), w, h, [this]() { QueueRender(); });
   if (!m_factory->IsValid())
   {
     LOG(LERROR, ("Can't create OpenGL ES 3 contexts for the map"));
@@ -224,9 +244,10 @@ void MapView::CreateEngine(int w, int h)
   p.m_surfaceHeight = h;
   p.m_visualScale = m_scale;
 
-  m_skin = std::make_unique<gui::Skin>(gui::ResolveGuiSkinFile("default"), m_scale);
-  m_skin->Resize(w, h);
-  m_skin->ForEach([&p](gui::EWidget widget, gui::Position const & pos)
+  // Only the initial placement: UpdateWidgetLayout() moves the widgets later.
+  gui::Skin skin(gui::ResolveGuiSkinFile("default"), m_scale);
+  skin.Resize(w, h);
+  skin.ForEach([&p](gui::EWidget widget, gui::Position const & pos)
   {
     // MainWindow provides persistent, clickable GTK attribution instead of the fading GL label.
     if (widget != gui::WIDGET_COPYRIGHT)
@@ -274,30 +295,29 @@ void MapView::UpdateWidgetLayout()
 gboolean MapView::OnRender(GdkGLContext *)
 {
   m_renderQueued = false;
-  uint32_t w = 0, h = 0;
-  GLuint const texture = m_factory ? m_factory->AcquireFrame(w, h) : 0;
-
-  if (texture == 0 || m_program == 0)
+  bool const drawn = m_program != 0 && m_factory &&
+                     m_factory->DrawFrame([this](GLuint texture)
+  {
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(m_program);
+    glBindVertexArray(m_vao);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glUniform1i(m_samplerLoc, 0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindVertexArray(0);
+    glUseProgram(0);
+  });
+  if (!drawn)
   {
     if (adw_style_manager_get_dark(adw_style_manager_get_default()))
       glClearColor(0.13f, 0.13f, 0.14f, 1.f);
     else
       glClearColor(0.93f, 0.93f, 0.91f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT);
-    return TRUE;
   }
-
-  glDisable(GL_BLEND);
-  glDisable(GL_DEPTH_TEST);
-  glUseProgram(m_program);
-  glBindVertexArray(m_vao);
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, texture);
-  glUniform1i(m_samplerLoc, 0);
-  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-  glBindTexture(GL_TEXTURE_2D, 0);
-  glBindVertexArray(0);
-  glUseProgram(0);
   return TRUE;
 }
 
@@ -322,27 +342,6 @@ m2::PointF MapView::ToDevice(double x, double y) const
   return m2::PointF(static_cast<float>(x * m_scale), static_cast<float>(y * m_scale));
 }
 
-void MapView::SendTouches(int type, uint8_t maskedIndex)
-{
-  if (m_touches.empty())
-    return;
-  df::TouchEvent event;
-  event.SetTouchType(static_cast<df::TouchEvent::ETouchType>(type));
-  df::Touch t1;
-  t1.m_id = m_touches[0].m_id;
-  t1.m_location = m_touches[0].m_pos;
-  event.SetFirstTouch(t1);
-  if (m_touches.size() > 1)
-  {
-    df::Touch t2;
-    t2.m_id = m_touches[1].m_id;
-    t2.m_location = m_touches[1].m_pos;
-    event.SetSecondTouch(t2);
-  }
-  event.SetFirstMaskedPointer(maskedIndex);
-  GetFramework().TouchEvent(event);
-}
-
 gboolean MapView::OnEvent(GdkEvent * event)
 {
   if (!m_engineCreated)
@@ -354,6 +353,12 @@ gboolean MapView::OnEvent(GdkEvent * event)
   bool const isMouse = type == GDK_BUTTON_PRESS || type == GDK_BUTTON_RELEASE || type == GDK_MOTION_NOTIFY;
   if (!isTouch && !isMouse)
     return FALSE;
+
+  if (type == GDK_TOUCH_CANCEL)
+  {
+    m_touches.TouchCancel(gdk_event_get_event_sequence(event));
+    return TRUE;
+  }
 
   // Legacy controllers get surface coordinates: translate to the widget.
   double sx = 0, sy = 0;
@@ -370,74 +375,29 @@ gboolean MapView::OnEvent(GdkEvent * event)
 
   if (isTouch)
   {
-    auto * seq = gdk_event_get_event_sequence(event);
-    auto it =
-        std::find_if(m_touches.begin(), m_touches.end(), [seq](ActiveTouch const & t) { return t.m_sequence == seq; });
-    switch (type)
-    {
-    case GDK_TOUCH_BEGIN:
-      if (m_touches.size() >= 2 || it != m_touches.end())
-        return TRUE;
+    void const * seq = gdk_event_get_event_sequence(event);
+    if (type == GDK_TOUCH_BEGIN && m_touches.TouchBegin(seq, pos))
       gtk_widget_grab_focus(m_area);
-      m_touches.push_back({seq, m_nextTouchId++, pos});
-      SendTouches(df::TouchEvent::TOUCH_DOWN, static_cast<uint8_t>(m_touches.size() - 1));
-      return TRUE;
-    case GDK_TOUCH_UPDATE:
-      if (it == m_touches.end())
-        return TRUE;
-      it->m_pos = pos;
-      SendTouches(df::TouchEvent::TOUCH_MOVE, m_touches.size() == 1 ? 0 : df::TouchEvent::INVALID_MASKED_POINTER);
-      return TRUE;
-    case GDK_TOUCH_END:
-    {
-      if (it == m_touches.end())
-        return TRUE;
-      it->m_pos = pos;
-      auto const index = static_cast<uint8_t>(it - m_touches.begin());
-      SendTouches(df::TouchEvent::TOUCH_UP, index);
-      m_touches.erase(m_touches.begin() + index);
-      return TRUE;
-    }
-    case GDK_TOUCH_CANCEL:
-      if (it == m_touches.end())
-        return TRUE;
-      SendTouches(df::TouchEvent::TOUCH_CANCEL, static_cast<uint8_t>(it - m_touches.begin()));
-      m_touches.clear();
-      return TRUE;
-    default: return FALSE;
-    }
+    else if (type == GDK_TOUCH_UPDATE)
+      m_touches.TouchUpdate(seq, pos);
+    else if (type == GDK_TOUCH_END)
+      m_touches.TouchEnd(seq, pos);
+    return TRUE;
   }
 
-  // Mouse emulates a single finger.
+  // Pointer events emulated from the touchscreen: the touches are handled above.
   if (auto * device = gdk_event_get_device(event); device && gdk_device_get_source(device) == GDK_SOURCE_TOUCHSCREEN)
-    return FALSE;
-  if (!m_touches.empty() && !m_mousePressed)
     return FALSE;
 
   switch (type)
   {
   case GDK_BUTTON_PRESS:
-    if (gdk_button_event_get_button(event) != GDK_BUTTON_PRIMARY)
+    if (gdk_button_event_get_button(event) != GDK_BUTTON_PRIMARY || !m_touches.MouseDown(pos))
       return FALSE;
     gtk_widget_grab_focus(m_area);
-    m_mousePressed = true;
-    m_touches = {{nullptr, m_nextTouchId++, pos}};
-    SendTouches(df::TouchEvent::TOUCH_DOWN, 0);
     return TRUE;
-  case GDK_MOTION_NOTIFY:
-    if (!m_mousePressed)
-      return FALSE;
-    m_touches[0].m_pos = pos;
-    SendTouches(df::TouchEvent::TOUCH_MOVE, 0);
-    return TRUE;
-  case GDK_BUTTON_RELEASE:
-    if (!m_mousePressed || gdk_button_event_get_button(event) != GDK_BUTTON_PRIMARY)
-      return FALSE;
-    m_touches[0].m_pos = pos;
-    SendTouches(df::TouchEvent::TOUCH_UP, 0);
-    m_touches.clear();
-    m_mousePressed = false;
-    return TRUE;
+  case GDK_MOTION_NOTIFY: return m_touches.MouseMove(pos);
+  case GDK_BUTTON_RELEASE: return gdk_button_event_get_button(event) == GDK_BUTTON_PRIMARY && m_touches.MouseUp(pos);
   default: return FALSE;
   }
 }
@@ -448,6 +408,10 @@ void MapView::OnScroll(double dx, double dy, GdkScrollUnit unit)
     return;
   UNUSED_VALUE(dx);
   double const steps = unit == GDK_SCROLL_UNIT_WHEEL ? dy : dy / 40.0;
-  GetFramework().Scale(std::exp(-steps * 0.25), m2::PointD(m_pointer), false);
+  double const factor = std::exp(-steps * 0.25);
+  if (m_pointer)
+    GetFramework().Scale(factor, m2::PointD(*m_pointer), false);
+  else
+    GetFramework().Scale(factor, false);
 }
 }  // namespace gtk

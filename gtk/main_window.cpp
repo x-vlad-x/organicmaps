@@ -41,7 +41,8 @@ char const * MyPositionIcon(location::EMyPositionMode mode)
 
 MainWindow::MainWindow(AdwApplication * app)
 {
-  m_window = ADW_APPLICATION_WINDOW(adw_application_window_new(GTK_APPLICATION(app)));
+  // Keep the object alive after the window is closed and destroyed by GTK.
+  m_window = ADW_APPLICATION_WINDOW(g_object_ref(adw_application_window_new(GTK_APPLICATION(app))));
   gtk_window_set_title(GTK_WINDOW(m_window), "Organic Maps");
   gtk_window_set_icon_name(GTK_WINDOW(m_window), kAppId);
   gtk_window_set_default_size(GTK_WINDOW(m_window), 420, 860);
@@ -67,19 +68,24 @@ MainWindow::MainWindow(AdwApplication * app)
                                          [this](GObject *, GParamSpec *) { OnSuspendedChanged(); });
   Connect<gboolean(GtkWindow *)>(m_window, "close-request", [this](GtkWindow *)
   {
-    // Keep the active route for the next launch, like the phone apps do.
-    m_routing->SaveForNextLaunch();
+    // Shut down while the widgets still exist: callbacks queued in the same main loop iteration
+    // must not reach them after GTK destroys the window.
+    Shutdown();
     return FALSE;
   });
 
   SyncAppColorScheme();
-  auto * styleManager = adw_style_manager_get_default();
-  Connect<void(GObject *, GParamSpec *)>(styleManager, "notify::dark",
-                                         [this](GObject *, GParamSpec *) { SyncNightMode(); });
+  // The style manager outlives the window: disconnected in Shutdown().
+  m_darkHandler = Connect<void(GObject *, GParamSpec *)>(adw_style_manager_get_default(), "notify::dark",
+                                                         [this](GObject *, GParamSpec *) { SyncNightMode(); });
   SyncNightMode();
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow()
+{
+  Shutdown();
+  g_object_unref(m_window);
+}
 
 void MainWindow::Present()
 {
@@ -91,14 +97,25 @@ void MainWindow::Shutdown()
   if (m_shutdown)
     return;
   m_shutdown = true;
+  GetApp().shuttingDown = true;
+  // Keep the active route for the next launch, like the phone apps do.
   m_routing->SaveForNextLaunch();
   m_location.Stop();
+  auto & fw = GetFramework();
+  fw.SetPlacePageListeners({}, {}, {}, {});
+  fw.SetMyPositionModeListener({});
+  fw.SetCurrentCountryChangedListener({});
   if (m_storageSubscription)
-    GetFramework().GetStorage().Unsubscribe(m_storageSubscription);
+    fw.GetStorage().Unsubscribe(m_storageSubscription);
   m_search->Shutdown();
   m_routing->Shutdown();
   m_downloader->Shutdown();
+  g_signal_handler_disconnect(adw_style_manager_get_default(), m_darkHandler);
+  if (m_insetsIdle != 0)
+    g_source_remove(m_insetsIdle);
   m_map->Shutdown();
+  // Disposes the widgets, which disconnects their handlers; not done by GTK after g_application_quit().
+  gtk_window_destroy(GTK_WINDOW(m_window));
 }
 
 void MainWindow::LoadCss()
@@ -296,7 +313,15 @@ void MainWindow::BuildMapControls(GtkWidget * overlay)
                                                                [this](GtkOverlay *, GtkWidget *, GdkRectangle *)
   {
     // Called during allocation; defer to keep it out of the layout pass.
-    g_idle_add_once([](gpointer data) { static_cast<MainWindow *>(data)->UpdateMapInsets(); }, this);
+    if (m_insetsIdle == 0)
+    {
+      m_insetsIdle = g_idle_add_once([](gpointer data)
+      {
+        auto * self = static_cast<MainWindow *>(data);
+        self->m_insetsIdle = 0;
+        self->UpdateMapInsets();
+      }, this);
+    }
     return FALSE;
   });
 }
@@ -740,7 +765,7 @@ void MainWindow::SyncNightMode()
 void MainWindow::OnSuspendedChanged()
 {
   bool const suspended = gtk_window_is_suspended(GTK_WINDOW(m_window));
-  if (suspended == m_suspended || !m_map->IsEngineCreated())
+  if (m_shutdown || suspended == m_suspended || !m_map->IsEngineCreated())
     return;
   m_suspended = suspended;
   auto & fw = GetFramework();

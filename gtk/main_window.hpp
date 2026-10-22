@@ -33,6 +33,8 @@ public:
   RoutingUi & Routing() { return *m_routing; }
 
   void Present();
+  // Stops everything that calls back into this object and destroys the window; the object itself
+  // may be deleted after the main loop has dispatched what is left.
   void Shutdown();
   void Toast(std::string const & text);
   void OpenFile(GFile * file);
@@ -121,6 +123,8 @@ private:
   bool m_controlsHidden = false;
   std::pair<int, int> m_lastInsets{-1, -1};
   bool m_shutdown = false;
+  gulong m_darkHandler = 0;
+  guint m_insetsIdle = 0;
   int m_storageSubscription = 0;
   guint m_keepScreenOnCookie = 0;
   std::function<void()> m_pendingUrl;

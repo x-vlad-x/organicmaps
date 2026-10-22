@@ -22,9 +22,15 @@ struct OffscreenFrame
   GLuint m_depthStencil = 0;
   uint32_t m_width = 0;
   uint32_t m_height = 0;
+  // Signals when the GTK context has finished reading the texture.
+  GLsync m_consumerFence = nullptr;
 
   OffscreenFrame(uint32_t w, uint32_t h);
   ~OffscreenFrame();
+
+  void SetConsumerFence(GLsync fence);
+  // Makes the following commands of the current context wait until the consumer is done.
+  void WaitForConsumer();
 };
 
 // Drape renders on its own thread into GdkGLContexts created from the display (surfaceless,
@@ -32,7 +38,7 @@ struct OffscreenFrame
 class GtkRenderContext : public dp::OGLContext
 {
 public:
-  GtkRenderContext(GdkGLContext * ctx, std::function<void()> onFrameReady);
+  GtkRenderContext(GdkGLContext * ctx, uint32_t w, uint32_t h, std::function<void()> onFrameReady);
   ~GtkRenderContext() override;
 
   void Present() override;
@@ -41,18 +47,21 @@ public:
   void SetFramebuffer(ref_ptr<dp::BaseFramebuffer> framebuffer) override;
   void Resize(uint32_t w, uint32_t h) override;
 
-  // Main thread: picks up the newest finished frame. Returns texture id (0 if none).
-  GLuint AcquireFrame(uint32_t & w, uint32_t & h);
+  // Main thread, GTK context current: draws the newest finished frame with |draw| and fences it.
+  // Returns false if there is no frame yet.
+  bool DrawFrame(std::function<void(GLuint texture)> const & draw);
 
 private:
   GdkGLContext * m_ctx;
+  uint32_t m_initialWidth;
+  uint32_t m_initialHeight;
   std::function<void()> m_onFrameReady;
   std::unique_ptr<OffscreenFrame> m_back;
   std::unique_ptr<OffscreenFrame> m_front;
   std::unique_ptr<OffscreenFrame> m_acquired;
-  // Frames replaced on resize; deleted later on the render thread (FBOs aren't shared).
-  std::vector<std::unique_ptr<OffscreenFrame>> m_garbage;
   bool m_frameUpdated = false;
+  bool m_hasFrame = false;
+  // Held by the main thread while it draws, so frames are never swapped or deleted under it.
   std::mutex m_frameMutex;
 };
 
@@ -74,8 +83,8 @@ private:
 class GtkContextFactory : public dp::GraphicsContextFactory
 {
 public:
-  // Contexts must be created and realized on the main thread.
-  GtkContextFactory(GdkDisplay * display, std::function<void()> onFrameReady);
+  // Contexts must be created and realized on the main thread. |w|, |h|: initial surface size.
+  GtkContextFactory(GdkDisplay * display, uint32_t w, uint32_t h, std::function<void()> onFrameReady);
   ~GtkContextFactory() override;
 
   bool IsValid() const { return m_drawCtx && m_uploadCtx; }
@@ -85,7 +94,7 @@ public:
   bool IsDrawContextCreated() const override { return true; }
   bool IsUploadContextCreated() const override { return true; }
 
-  GLuint AcquireFrame(uint32_t & w, uint32_t & h);
+  bool DrawFrame(std::function<void(GLuint texture)> const & draw);
   void PrepareToShutdown() { m_shutdown = true; }
 
 private:

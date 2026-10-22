@@ -37,6 +37,8 @@ set(SRC
   settings.hpp
   style.cpp
   style.hpp
+  touch_input.cpp
+  touch_input.hpp
   tts.cpp
   tts.hpp
 )
@@ -68,6 +70,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE map PkgConfig::GTK_APP_DEPS)
 # The core links its own static FreeType and HarfBuzz: don't export them, or they override the
 # system ones used by Pango and cairo (without PNG support color emoji are not drawn).
 target_link_options(${PROJECT_NAME} PRIVATE -Wl,--exclude-libs,ALL)
+
+omim_add_test_subdirectory(gtk_tests)
 
 install(TARGETS ${PROJECT_NAME} DESTINATION bin/)
 install(DIRECTORY ${OMIM_ROOT}/data DESTINATION share/organicmaps/)

@@ -63,6 +63,8 @@ SearchUi::SearchUi(MainWindow & window) : m_window(window)
 void SearchUi::Shutdown()
 {
   GetFramework().GetSearchAPI().CancelAllSearches();
+  // Results already queued on the main loop are dropped as outdated.
+  ++m_timestamp;
 }
 
 std::string SearchUi::InputLocale() const

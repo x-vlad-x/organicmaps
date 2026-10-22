@@ -54,20 +54,10 @@ void OnActivate(GApplication *, gpointer)
 
 void OnShutdown(GApplication *, gpointer)
 {
-  using namespace gtk;
-  auto & app = GetApp();
-  if (app.window)
-  {
-    app.window->Shutdown();
-    delete app.window;
-    app.window = nullptr;
-  }
-  if (app.framework)
-  {
-    app.framework->PrepareToShutdown();
-    delete app.framework;
-    app.framework = nullptr;
-  }
+  // GApplication still dispatches pending sources after "shutdown": the objects are deleted when
+  // g_application_run() returns.
+  if (auto * w = gtk::GetApp().window)
+    w->Shutdown();
 }
 }  // namespace
 
@@ -111,6 +101,15 @@ int main(int argc, char * argv[])
     }, app);
 
   int const status = g_application_run(G_APPLICATION(app), argc, argv);
+  auto & state = gtk::GetApp();
+  delete state.window;
+  state.window = nullptr;
+  if (state.framework)
+  {
+    state.framework->PrepareToShutdown();
+    delete state.framework;
+    state.framework = nullptr;
+  }
   g_object_unref(app);
   LOG(LINFO, ("Organic Maps finished with code", status));
   return status;

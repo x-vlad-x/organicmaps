@@ -26,7 +26,8 @@ void RunOnUiThread(std::function<void()> fn)
   auto * heap = new std::function<void()>(std::move(fn));
   g_main_context_invoke_full(nullptr, G_PRIORITY_DEFAULT, [](gpointer data) -> gboolean
   {
-    (*static_cast<std::function<void()> *>(data))();
+    if (!GetApp().shuttingDown)
+      (*static_cast<std::function<void()> *>(data))();
     return G_SOURCE_REMOVE;
   }, heap, [](gpointer data) { delete static_cast<std::function<void()> *>(data); });
 }

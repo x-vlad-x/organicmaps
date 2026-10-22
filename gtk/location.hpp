@@ -11,8 +11,13 @@ using GClueSimple = struct _GClueSimple;
 
 namespace gtk
 {
+// GeoClue may return an old cached location, and timestamps may go back. Like the desktop
+// PositionFilter: fixes older than 5 minutes or older than the previous one are not current.
+bool IsCurrentLocation(location::GpsInfo const & info, std::optional<location::GpsInfo> const & previous,
+                       double nowSec);
+
 // GPS through GeoClue (on FuriOS it uses the hybris GNSS source) and the magnetometer through
-// iio-sensor-proxy. Updates are delivered to the Framework on the main thread.
+// iio-sensor-proxy. Updates are delivered on the main thread; nothing is called after Stop().
 class LocationService
 {
 public:
@@ -37,10 +42,17 @@ public:
   std::function<void(double bearingRad)> m_onCompass;
 
 private:
+  // User data of an async call: it may complete after Stop() and even after the next Start().
+  struct Request;
+  gpointer NewRequest();
+  // Frees the request; returns nullptr if it was cancelled.
+  static LocationService * TakeRequest(gpointer data);
+
   static void OnSimpleReady(GObject * source, GAsyncResult * res, gpointer data);
   static void OnLocationNotify(GObject * obj, GParamSpec * pspec, gpointer data);
   void ReadLocation();
-  void StartCompass();
+  static void OnCompassProxyReady(GObject * source, GAsyncResult * res, gpointer data);
+  static void OnCompassClaimed(GObject * source, GAsyncResult * res, gpointer data);
   void StopCompass();
   static void OnCompassProperties(GDBusProxy * proxy, GVariant * changed, GStrv invalidated, gpointer data);
 

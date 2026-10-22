@@ -58,6 +58,8 @@ DownloaderPage::~DownloaderPage()
 void DownloaderPage::Shutdown()
 {
   GetFramework().GetSearchAPI().CancelAllSearches();
+  // Results already queued on the main loop are dropped as outdated.
+  ++m_searchTimestamp;
 }
 
 void DownloaderPage::Show(storage::CountryId const & rootArg)

@@ -8,6 +8,11 @@
 
 namespace gtk
 {
+namespace
+{
+uint64_t constexpr kFenceTimeoutNs = 1'000'000'000;
+}  // namespace
+
 OffscreenFrame::OffscreenFrame(uint32_t w, uint32_t h) : m_width(w), m_height(h)
 {
   glGenTextures(1, &m_texture);
@@ -37,22 +42,44 @@ OffscreenFrame::OffscreenFrame(uint32_t w, uint32_t h) : m_width(w), m_height(h)
 
 OffscreenFrame::~OffscreenFrame()
 {
+  if (m_consumerFence)
+  {
+    // Frames are deleted rarely (resize, shutdown): a CPU wait is fine.
+    glClientWaitSync(m_consumerFence, 0, kFenceTimeoutNs);
+    glDeleteSync(m_consumerFence);
+  }
   glDeleteFramebuffers(1, &m_fbo);
   glDeleteRenderbuffers(1, &m_depthStencil);
   glDeleteTextures(1, &m_texture);
 }
 
-GtkRenderContext::GtkRenderContext(GdkGLContext * ctx, std::function<void()> onFrameReady)
+void OffscreenFrame::SetConsumerFence(GLsync fence)
+{
+  if (m_consumerFence)
+    glDeleteSync(m_consumerFence);
+  m_consumerFence = fence;
+}
+
+void OffscreenFrame::WaitForConsumer()
+{
+  if (!m_consumerFence)
+    return;
+  glWaitSync(m_consumerFence, 0, GL_TIMEOUT_IGNORED);
+  glDeleteSync(m_consumerFence);
+  m_consumerFence = nullptr;
+}
+
+GtkRenderContext::GtkRenderContext(GdkGLContext * ctx, uint32_t w, uint32_t h, std::function<void()> onFrameReady)
   : m_ctx(GDK_GL_CONTEXT(g_object_ref(ctx)))
+  , m_initialWidth(w)
+  , m_initialHeight(h)
   , m_onFrameReady(std::move(onFrameReady))
 {}
 
 GtkRenderContext::~GtkRenderContext()
 {
-  // Frames must be released with the context current; the render thread does it in DoneCurrent
-  // on shutdown, here we only drop what is left.
+  // The render thread is joined by now. FBOs are not shared: delete the frames in their context.
   gdk_gl_context_make_current(m_ctx);
-  m_garbage.clear();
   m_back.reset();
   m_front.reset();
   m_acquired.reset();
@@ -63,6 +90,9 @@ GtkRenderContext::~GtkRenderContext()
 void GtkRenderContext::MakeCurrent()
 {
   gdk_gl_context_make_current(m_ctx);
+  // The engine draws an empty frame before the first Resize(); the context itself is surfaceless.
+  if (!m_back)
+    Resize(m_initialWidth, m_initialHeight);
 }
 
 void GtkRenderContext::DoneCurrent()
@@ -79,6 +109,8 @@ void GtkRenderContext::Present()
     std::lock_guard lock(m_frameMutex);
     std::swap(m_front, m_back);
     m_frameUpdated = true;
+    // The new back frame may be the one the GTK context has just drawn.
+    m_back->WaitForConsumer();
   }
   if (m_onFrameReady)
     m_onFrameReady();
@@ -98,34 +130,32 @@ void GtkRenderContext::Resize(uint32_t w, uint32_t h)
   if (m_back && m_back->m_width == w && m_back->m_height == h)
     return;
 
-  m_garbage.clear();
-  if (m_back)
-    m_garbage.push_back(std::move(m_back));
-  if (m_front)
-    m_garbage.push_back(std::move(m_front));
-  if (m_acquired)
-    m_garbage.push_back(std::move(m_acquired));
-
+  // The main thread is not drawing (it holds the mutex while it does), and the old frames wait
+  // for their consumer fences before deletion.
   m_back = std::make_unique<OffscreenFrame>(w, h);
   m_front = std::make_unique<OffscreenFrame>(w, h);
   m_acquired = std::make_unique<OffscreenFrame>(w, h);
   m_frameUpdated = false;
+  m_hasFrame = false;
   glBindFramebuffer(GL_FRAMEBUFFER, m_back->m_fbo);
 }
 
-GLuint GtkRenderContext::AcquireFrame(uint32_t & w, uint32_t & h)
+bool GtkRenderContext::DrawFrame(std::function<void(GLuint texture)> const & draw)
 {
   std::lock_guard lock(m_frameMutex);
   if (m_frameUpdated)
   {
     std::swap(m_acquired, m_front);
     m_frameUpdated = false;
+    m_hasFrame = true;
   }
-  if (!m_acquired)
-    return 0;
-  w = m_acquired->m_width;
-  h = m_acquired->m_height;
-  return m_acquired->m_texture;
+  if (!m_hasFrame)
+    return false;
+  draw(m_acquired->m_texture);
+  m_acquired->SetConsumerFence(glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0));
+  // Another context waits for the fence: it must reach the GPU.
+  glFlush();
+  return true;
 }
 
 GtkUploadContext::GtkUploadContext(GdkGLContext * ctx) : m_ctx(GDK_GL_CONTEXT(g_object_ref(ctx))) {}
@@ -145,12 +175,12 @@ void GtkUploadContext::DoneCurrent()
   gdk_gl_context_clear_current();
 }
 
-GtkContextFactory::GtkContextFactory(GdkDisplay * display, std::function<void()> onFrameReady)
+GtkContextFactory::GtkContextFactory(GdkDisplay * display, uint32_t w, uint32_t h, std::function<void()> onFrameReady)
 {
   m_drawCtx = CreateContext(display);
   m_uploadCtx = CreateContext(display);
   if (m_drawCtx)
-    m_draw = std::make_unique<GtkRenderContext>(m_drawCtx, std::move(onFrameReady));
+    m_draw = std::make_unique<GtkRenderContext>(m_drawCtx, w, h, std::move(onFrameReady));
   if (m_uploadCtx)
     m_upload = std::make_unique<GtkUploadContext>(m_uploadCtx);
 }
@@ -197,10 +227,10 @@ dp::GraphicsContext * GtkContextFactory::GetResourcesUploadContext()
   return m_upload.get();
 }
 
-GLuint GtkContextFactory::AcquireFrame(uint32_t & w, uint32_t & h)
+bool GtkContextFactory::DrawFrame(std::function<void(GLuint texture)> const & draw)
 {
   if (m_shutdown || !m_draw)
-    return 0;
-  return m_draw->AcquireFrame(w, h);
+    return false;
+  return m_draw->DrawFrame(draw);
 }
 }  // namespace gtk

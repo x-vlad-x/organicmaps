@@ -395,6 +395,11 @@ void BookmarksPage::ChooseFileToImport()
     GFile * file = gtk_file_dialog_open_finish(GTK_FILE_DIALOG(src), res, nullptr);
     if (!file)
       return;
+    if (GetApp().shuttingDown)
+    {
+      g_object_unref(file);
+      return;
+    }
     if (char * path = g_file_get_path(file))
     {
       static_cast<BookmarksPage *>(data)->ImportFile(path);
